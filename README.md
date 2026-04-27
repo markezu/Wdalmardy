@@ -1,4 +1,4 @@
-# Wad Almardi Market
+## Wad Almardi Market
 
 Bilingual (Arabic / English, RTL) e-commerce platform for **Wad Almardi Market** in Sudan, with a customer-facing storefront, WhatsApp ordering, and a forthcoming admin dashboard, POS, and ERP.
 
