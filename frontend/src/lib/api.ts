@@ -55,8 +55,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     cache: init?.cache ?? 'no-store',
   });
   if (!res.ok) {
+    let message = res.statusText;
     const text = await res.text().catch(() => '');
-    throw new Error(`API ${res.status}: ${text || res.statusText}`);
+    if (text) {
+      try {
+        const body = JSON.parse(text) as { message?: unknown };
+        if (typeof body.message === 'string') {
+          message = body.message;
+        } else {
+          message = text;
+        }
+      } catch {
+        message = text;
+      }
+    }
+    throw new Error(`API ${res.status}: ${message}`);
   }
   return res.json();
 }
@@ -100,8 +113,46 @@ export type CreateOrderInput = {
   delivery_method: 'delivery' | 'pickup';
   payment_method: 'whatsapp' | 'cod' | 'bank_transfer';
   notes?: string;
+  coupon_code?: string;
   items: { product_id: number; quantity: number }[];
 };
+
+export type ActiveOffer = {
+  id: number;
+  type: 'banner' | 'daily' | 'weekly' | 'percentage' | 'fixed' | 'free_shipping';
+  title: string;
+  title_en: string | null;
+  description: string | null;
+  description_en: string | null;
+  discount_value: number;
+  discount_unit: 'percent' | 'amount' | 'free_shipping';
+  banner_image: string | null;
+  banner_link: string | null;
+  ends_at: string | null;
+};
+
+export async function getActiveOffers(): Promise<{ data: ActiveOffer[] }> {
+  return request('/offers/active');
+}
+
+export type CouponValidation = {
+  code: string;
+  type: 'percent' | 'fixed' | 'free_shipping';
+  value: number;
+  discount: number;
+  free_shipping: boolean;
+};
+
+export async function validateCoupon(
+  code: string,
+  subtotal: number,
+  shipping: number,
+): Promise<{ data: CouponValidation }> {
+  return request('/coupons/validate', {
+    method: 'POST',
+    body: JSON.stringify({ code, subtotal, shipping }),
+  });
+}
 
 export type CreateOrderResponse = {
   data: {
