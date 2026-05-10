@@ -28,6 +28,7 @@ class OrderController extends Controller
             'payment_method' => 'required|in:whatsapp,cod,bank_transfer',
             'notes' => 'nullable|string|max:500',
             'coupon_code' => 'nullable|string|max:60',
+            'redeem_points' => 'nullable|integer|min:0|max:1000000',
             'delivery_zone_id' => 'nullable|integer|exists:delivery_zones,id',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|integer|exists:products,id',
@@ -45,7 +46,13 @@ class OrderController extends Controller
         }
 
         $order = DB::transaction(function () use ($validated, $deliveryFee, $zone) {
-            $customer = Customer::firstOrNew(['phone' => $validated['customer_phone']]);
+            // Lock the customer row so two concurrent orders for the same phone
+            // (e.g. a redeem-points double-submit) can't both pass the balance
+            // check and apply the discount twice.
+            $customer = Customer::where('phone', $validated['customer_phone'])
+                ->lockForUpdate()
+                ->first()
+                ?? new Customer(['phone' => $validated['customer_phone']]);
             $customer->fill([
                 'name' => $validated['customer_name'],
                 'email' => $validated['customer_email'] ?? $customer->email,
@@ -86,9 +93,21 @@ class OrderController extends Controller
                     $coupon = null;
                 }
             }
+            // Loyalty redemption — validate against the (now-known) customer balance
+            // and a 50% subtotal cap so an order can never be zeroed out by points.
+            $requestedRedeem = (int) ($validated['redeem_points'] ?? 0);
+            $pointsRedeemed = 0;
+            $pointsDiscount = 0.0;
+            if ($requestedRedeem > 0) {
+                $maxByBalance = (int) $customer->loyalty_points;
+                $maxByCap = (int) floor(($subtotal * Order::LOYALTY_REDEEM_CAP_PCT) / Order::LOYALTY_REDEEM_VALUE);
+                $pointsRedeemed = max(0, min($requestedRedeem, $maxByBalance, $maxByCap));
+                $pointsDiscount = $pointsRedeemed * Order::LOYALTY_REDEEM_VALUE;
+            }
+
             $total = ($coupon?->type === 'free_shipping')
-                ? $subtotal + $finalDeliveryFee
-                : max(0, $subtotal - $discount) + $finalDeliveryFee;
+                ? max(0, $subtotal - $pointsDiscount) + $finalDeliveryFee
+                : max(0, $subtotal - $discount - $pointsDiscount) + $finalDeliveryFee;
 
             $order = Order::create([
                 'order_number' => Order::generateOrderNumber(),
@@ -110,10 +129,16 @@ class OrderController extends Controller
                 'coupon_id' => $coupon?->id,
                 'coupon_code' => $coupon?->code,
                 'discount_amount' => $discount,
+                'points_redeemed' => $pointsRedeemed,
+                'points_discount' => $pointsDiscount,
             ]);
 
             if ($coupon) {
                 $coupon->increment('used_count');
+            }
+
+            if ($pointsRedeemed > 0) {
+                $customer->awardPoints(-$pointsRedeemed, 'redeem', $order->id, 'استبدال في طلب '.$order->order_number);
             }
 
             foreach ($itemsToCreate as $item) {
@@ -146,6 +171,8 @@ class OrderController extends Controller
                 'subtotal' => (float) $order->subtotal,
                 'delivery_fee' => (float) $order->delivery_fee,
                 'discount_amount' => (float) $order->discount_amount,
+                'points_redeemed' => (int) $order->points_redeemed,
+                'points_discount' => (float) $order->points_discount,
                 'coupon_code' => $order->coupon_code,
                 'status' => $order->status,
                 'whatsapp_url' => $order->payment_method === 'whatsapp'
@@ -190,6 +217,9 @@ class OrderController extends Controller
         if ((float) $order->discount_amount > 0) {
             $code = $order->coupon_code ? " (كود: {$order->coupon_code})" : '';
             $lines[] = 'الخصم'.$code.': -'.number_format((float) $order->discount_amount).' ج.س';
+        }
+        if ((int) $order->points_redeemed > 0) {
+            $lines[] = 'نقاط مستبدلة ('.number_format((int) $order->points_redeemed).' نقطة): -'.number_format((float) $order->points_discount).' ج.س';
         }
         $lines[] = 'رسوم التوصيل: '.number_format((float) $order->delivery_fee).' ج.س';
         $lines[] = '*الإجمالي: '.number_format((float) $order->total).' ج.س*';

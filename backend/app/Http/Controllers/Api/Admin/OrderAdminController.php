@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\View;
 use Mpdf\Mpdf;
 
@@ -61,7 +62,20 @@ class OrderAdminController extends Controller
             'assigned_driver_id' => 'nullable|integer|exists:users,id',
         ]);
 
-        $order->update($validated);
+        // Cancellation is a terminal state — the loyalty refund has already
+        // been issued and the order's totals/movement-ledger reflect the
+        // cancellation. Re-activating to a non-cancelled status would create
+        // ambiguous loyalty state (re-award vs keep refund) and stale totals,
+        // so it's disallowed. Admins should clone the order instead.
+        if ($order->status === 'cancelled' && $validated['status'] !== 'cancelled') {
+            return response()->json([
+                'message' => 'لا يمكن إعادة تفعيل طلب ملغى. يرجى إنشاء طلب جديد.',
+            ], 422);
+        }
+
+        DB::transaction(function () use ($order, $validated) {
+            $order->update($validated);
+        });
 
         return response()->json(['data' => $order->fresh(['items', 'driver:id,name'])]);
     }
